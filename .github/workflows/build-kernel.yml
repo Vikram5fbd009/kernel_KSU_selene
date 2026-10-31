@@ -306,64 +306,26 @@ jobs:
           echo "✅ All ',true)' fallbacks removed (including symlinked dirs)"
         fi
 
-    # ==========================================================
-    # ✅ HARDEN cc-option: never let it return 'true' on failure
-    # ==========================================================
     - name: Harden cc-option (never return 'true')
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
 
-        # Backup original
+        echo "=== BEFORE: current cc-option/try-run defs ==="
+        grep -nE '^[[:space:]]*(cc-option|try-run)[[:space:]]*[:+]?=' scripts/Kbuild.include || true
+
         cp scripts/Kbuild.include scripts/Kbuild.include.bak
 
-        # Replace cc-option definition so it never yields 'true'
-        python3 - << 'PYEOF'
-        import re
-        p = "scripts/Kbuild.include"
-        src = open(p, "r").read()
+        cat >> scripts/Kbuild.include << 'KSU_EOF'
 
-        # Remove old cc-option definition (single line form)
-        lines = src.splitlines()
-        out = []
-        skip = False
-        for ln in lines:
-            if re.match(r'^\s*cc-option\s*=', ln):
-                continue
-            if re.match(r'^\s*cc-option\s*=\s*\$\(call\s+try-run', ln):
-                continue
-            out.append(ln)
-        src = "\n".join(out) + "\n"
+        # ============================================================
+        # KSU HARDENING (appended last, overrides earlier definitions)
+        # cc-option NEVER returns the literal 'true' on failure.
+        # ============================================================
+        cc-option = $(shell TMP=$$(mktemp -t ccopt.XXXXXX); if $(CC) $(KBUILD_CPPFLAGS) $(KBUILD_CFLAGS) $(1) -Werror -c -x c /dev/null -o "$$TMP" >/dev/null 2>&1; then echo "$(1)"; fi; rm -f "$$TMP")
+        KSU_EOF
 
-        # Append a hardened definition
-        src += """
-# --- HARDENED cc-option: never return 'true' on failure ---
-cc-option = $(shell,if $(CC) $(KBUILD_CPPFLAGS) $(KBUILD_CFLAGS) $(1) -E -x c /dev/null >/dev/null 2>&1 && echo $(1),)
-"""
-        open(p, "w").write(src)
-        print("cc-option hardened.")
-        PYEOF
-
-        # Also patch `try-run` so the fallback is empty, never `true`
-        python3 - << 'PYEOF'
-        import re
-        p = "scripts/Kbuild.include"
-        src = open(p, "r").read()
-        lines = src.splitlines()
-        out = []
-        for ln in lines:
-            if re.match(r'^\s*try-run\s*=', ln):
-                # Replace: fallback was $$(3) which can be "true"
-                # Force last arg to empty string
-                ln = 'try-run = $(shell set -e; TMP=$$(mktemp -t "try-run.XXXXXX"); ' \
-                     'if ( $(1) ) > $$TMP 2>&1; then cat $$TMP; else cat $$TMP >&2; fi; ' \
-                     'rm -f $$TMP; echo)'
-            out.append(ln)
-        open(p, "w").write("\n".join(out) + "\n")
-        print("try-run hardened.")
-        PYEOF
-
-        echo "=== New cc-option definition ==="
-        grep -n "cc-option" scripts/Kbuild.include | head -20 || true
+        echo "=== AFTER: current cc-option/try-run defs ==="
+        grep -nE '^[[:space:]]*(cc-option|try-run)[[:space:]]*[:+]?=' scripts/Kbuild.include || true
 
     - name: Build kernel
       run: |
@@ -385,9 +347,6 @@ cc-option = $(shell,if $(CC) $(KBUILD_CPPFLAGS) $(KBUILD_CFLAGS) $(1) -E -x c /d
         "$CC_PATH" --version | head -1
         "$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin/aarch64-linux-android-gcc" --version 2>/dev/null | head -1 || echo "GCC-64 prefix missing"
 
-        # -Werror=unknown-warning-option हटा दिया गया, क्योंकि clang-11 इसे
-        # सपोर्ट करता है पर कुछ MTK फाइल्स में अनजाने warning flags आते हैं
-        # जिससे बिल्ड बेवजह फेल होता है। cc-option hardening ऊपर पहले ही हो चुका है।
         KCFLAGS_FIX="-Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=return-type -Wno-error=macro-redefined -Wno-error=array-bounds -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=address-of-packed-member"
 
         echo "KCFLAGS_FIX: $KCFLAGS_FIX"
@@ -406,6 +365,10 @@ cc-option = $(shell,if $(CC) $(KBUILD_CPPFLAGS) $(KBUILD_CFLAGS) $(1) -E -x c /d
           CROSS_COMPILE_ARM32=arm-linux-androideabi- \
           KCFLAGS="$KCFLAGS_FIX" \
           ${{ env.KERNEL_CONFIG }}
+
+        echo "=== Printing KBUILD_CFLAGS from make (diagnostic) ==="
+        echo 'print-%: ; @echo $* = $($*)' > /tmp/print.mk
+        make -f /tmp/print.mk -f Makefile O=out ARCH=arm64 print-KBUILD_CFLAGS 2>&1 | tail -3 || true
 
         echo "=== Running full build ==="
         make -j$(nproc --all) O=out ARCH=arm64 \
