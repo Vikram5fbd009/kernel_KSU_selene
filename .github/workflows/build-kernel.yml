@@ -278,25 +278,17 @@ jobs:
         [ -f arch/arm64/Makefile ] && sed -i 's/$(error CROSS_COMPILE_COMPAT not defined/$(warning CROSS_COMPILE_COMPAT not defined/' arch/arm64/Makefile
         [ -f arch/arm64/Makefile ] && sed -i 's/$(error $(CROSS_COMPILE_COMPAT)/$(warning $(CROSS_COMPILE_COMPAT)/' arch/arm64/Makefile
 
-    # ==========================================================
-    # ✅ FIX #1: cc-option ',true)' fallbacks — INCLUDING SYMLINKS
-    # - drivers/kernelsu is a SYMLINK to KernelSU/kernel
-    # - grep -r does NOT follow symlinks → use grep -R
-    # - Also patch KernelSU/ directly as a safety net
-    # ==========================================================
     - name: Fix cc-option 'true' fallbacks (follow symlinks)
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         echo "=== Scanning for cc-option ',true)' fallbacks (following symlinks) ==="
 
-        # -R (capital R) follows symlinks, so drivers/kernelsu/** gets scanned too
         grep -RlE "cc-option.*, *true\)" \
           --include="Makefile*" --include="*.mk" --include="Kbuild*" . 2>/dev/null | while read f; do
             echo "  Patching: $f"
             sed -i -E '/cc-option/ s/, *true\)/)/g' "$f"
         done
 
-        # Explicit safety net: patch KernelSU/ tree directly (in case symlink quirks)
         if [ -d KernelSU ]; then
           echo "=== Safety-net patch: KernelSU/ tree ==="
           grep -RlE "cc-option.*, *true\)" \
@@ -314,12 +306,70 @@ jobs:
           echo "✅ All ',true)' fallbacks removed (including symlinked dirs)"
         fi
 
+    # ==========================================================
+    # ✅ HARDEN cc-option: never let it return 'true' on failure
+    # ==========================================================
+    - name: Harden cc-option (never return 'true')
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+
+        # Backup original
+        cp scripts/Kbuild.include scripts/Kbuild.include.bak
+
+        # Replace cc-option definition so it never yields 'true'
+        python3 - << 'PYEOF'
+        import re
+        p = "scripts/Kbuild.include"
+        src = open(p, "r").read()
+
+        # Remove old cc-option definition (single line form)
+        lines = src.splitlines()
+        out = []
+        skip = False
+        for ln in lines:
+            if re.match(r'^\s*cc-option\s*=', ln):
+                continue
+            if re.match(r'^\s*cc-option\s*=\s*\$\(call\s+try-run', ln):
+                continue
+            out.append(ln)
+        src = "\n".join(out) + "\n"
+
+        # Append a hardened definition
+        src += """
+# --- HARDENED cc-option: never return 'true' on failure ---
+cc-option = $(shell,if $(CC) $(KBUILD_CPPFLAGS) $(KBUILD_CFLAGS) $(1) -E -x c /dev/null >/dev/null 2>&1 && echo $(1),)
+"""
+        open(p, "w").write(src)
+        print("cc-option hardened.")
+        PYEOF
+
+        # Also patch `try-run` so the fallback is empty, never `true`
+        python3 - << 'PYEOF'
+        import re
+        p = "scripts/Kbuild.include"
+        src = open(p, "r").read()
+        lines = src.splitlines()
+        out = []
+        for ln in lines:
+            if re.match(r'^\s*try-run\s*=', ln):
+                # Replace: fallback was $$(3) which can be "true"
+                # Force last arg to empty string
+                ln = 'try-run = $(shell set -e; TMP=$$(mktemp -t "try-run.XXXXXX"); ' \
+                     'if ( $(1) ) > $$TMP 2>&1; then cat $$TMP; else cat $$TMP >&2; fi; ' \
+                     'rm -f $$TMP; echo)'
+            out.append(ln)
+        open(p, "w").write("\n".join(out) + "\n")
+        print("try-run hardened.")
+        PYEOF
+
+        echo "=== New cc-option definition ==="
+        grep -n "cc-option" scripts/Kbuild.include | head -20 || true
+
     - name: Build kernel
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-32/bin:$PATH"
 
-        # Sanitize any inherited KCFLAGS / KBUILD_CFLAGS from environment
         unset KCFLAGS || true
         unset KBUILD_CFLAGS || true
 
@@ -335,9 +385,9 @@ jobs:
         "$CC_PATH" --version | head -1
         "$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin/aarch64-linux-android-gcc" --version 2>/dev/null | head -1 || echo "GCC-64 prefix missing"
 
-        # ✅ FIX #2: '-Wno-error=misleading-indentation' REMOVED.
-        #             It is a GCC-only warning unknown to clang-11.
-        #             Passing it makes the cc-option probe fail and (pre-fix) injects 'true'.
+        # -Werror=unknown-warning-option हटा दिया गया, क्योंकि clang-11 इसे
+        # सपोर्ट करता है पर कुछ MTK फाइल्स में अनजाने warning flags आते हैं
+        # जिससे बिल्ड बेवजह फेल होता है। cc-option hardening ऊपर पहले ही हो चुका है।
         KCFLAGS_FIX="-Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=return-type -Wno-error=macro-redefined -Wno-error=array-bounds -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=address-of-packed-member"
 
         echo "KCFLAGS_FIX: $KCFLAGS_FIX"
