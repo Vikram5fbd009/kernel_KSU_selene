@@ -37,12 +37,22 @@ jobs:
       with:
         swap-size-gb: 6
 
+    # ==========================================================
+    # 🔧 FIXED: 32-bit i386 packages removed (not needed for arm64)
+    # ==========================================================
     - name: Setup kernel build environment
       run: |
         echo "BUILD_TIME=$(TZ=UTC date "+%Y%m%d%H%M")" >> $GITHUB_ENV
         echo "DEVICE=$(echo ${{ env.KERNEL_CONFIG }} | sed 's!vendor/!!;s/_defconfig//;s/_user//;s/-perf//')" >> $GITHUB_ENV
         sudo apt-get update
-        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen minicom bc libc6-dev-i386 lib32ncurses5-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python3 binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu
+        sudo apt-get install -y \
+          git ccache automake flex lzop bison gperf \
+          build-essential zip curl zlib1g-dev libxml2-utils \
+          bzip2 libbz2-dev squashfs-tools pngcrush schedtool \
+          dpkg-dev liblz4-tool make optipng maven libssl-dev \
+          pwgen minicom bc libx11-dev libgl1-mesa-dev xsltproc \
+          unzip device-tree-compiler python3 \
+          binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
     # ==========================================================
@@ -55,10 +65,9 @@ jobs:
         mkdir -p clang
         CLANG_NAME="clang-${{ env.CLANG_VERSION }}"
         PRIMARY_BRANCH="${{ env.CLANG_BRANCH }}"
-        echo "Target: $CLANG_NAME from branch $PRIMARY_BRANCH"
+        echo "Target: $CLANG_NAME from $PRIMARY_BRANCH"
 
         DOWNLOADED=false
-        # Primary branch first, then fallbacks
         for BRANCH in "$PRIMARY_BRANCH" android11-release android12-release main; do
           URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${BRANCH}/${CLANG_NAME}.tar.gz"
           echo "→ Trying $BRANCH"
@@ -77,7 +86,7 @@ jobs:
 
         tar -C clang/ -zxvf clang.tar.gz
         rm -f clang.tar.gz
-        ls clang/bin/clang >/dev/null || (echo "❌ clang binary missing after extract" && exit 1)
+        ls clang/bin/clang >/dev/null || (echo "❌ clang binary missing" && exit 1)
         echo "✅ Clang: $(clang/bin/clang --version | head -1)"
 
     - name: Download Custom Clang
@@ -98,9 +107,6 @@ jobs:
         else
             wget -nv -O clang.zip ${{ env.CUSTOM_CLANG_SOURCE }}
             unzip clang.zip -d clang/
-        fi
-        if [ "$(find ./clang -mindepth 1 -maxdepth 1 -type d | wc -l)" = "1" ]; then
-            mv -f "$(find ./clang -mindepth 1 -maxdepth 1 -type d)"/* ./clang
         fi
 
     - name: Download GCC AOSP
@@ -137,13 +143,6 @@ jobs:
                 tar -C gcc-64/ -Jxvf gcc-64.xz
             elif [[ ${{ env.CUSTOM_GCC_64_SOURCE }} == *'.git' ]]; then
                 git clone ${{ env.CUSTOM_GCC_64_SOURCE }} -b ${{ env.CUSTOM_GCC_64_BRANCH }} gcc-64 --depth=1
-            else
-                wget -nv -O gcc-64.zip ${{ env.CUSTOM_GCC_64_SOURCE }}
-                mkdir -p gcc-64
-                unzip gcc-64.zip -d gcc-64/
-            fi
-            if [ "$(find ./gcc-64 -mindepth 1 -maxdepth 1 -type d | wc -l)" = "1" ]; then
-                mv -f "$(find ./gcc-64 -mindepth 1 -maxdepth 1 -type d)"/* ./gcc-64
             fi
         fi
         if [ "${{ env.USE_CUSTOM_GCC_32 }}" = "true" ]; then
@@ -157,21 +156,8 @@ jobs:
                 tar -C gcc-32/ -Jxvf gcc-32.xz
             elif [[ ${{ env.CUSTOM_GCC_32_SOURCE }} == *'.git' ]]; then
                 git clone ${{ env.CUSTOM_GCC_32_SOURCE }} -b ${{ env.CUSTOM_GCC_32_BRANCH }} gcc-32 --depth=1
-            else
-                wget -nv -O gcc-32.zip ${{ env.CUSTOM_GCC_32_SOURCE }}
-                mkdir -p gcc-32
-                unzip gcc-32.zip -d gcc-32/
-            fi
-            if [ "$(find ./gcc-32 -mindepth 1 -maxdepth 1 -type d | wc -l)" = "1" ]; then
-                mv -f "$(find ./gcc-32 -mindepth 1 -maxdepth 1 -type d)"/* ./gcc-32
             fi
         fi
-
-    - name: Download mkbootimg tools
-      if: env.BUILD_BOOT_IMG == 'true'
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace
-        git clone https://android.googlesource.com/platform/system/tools/mkbootimg tools -b master-kernel-build-2022 --depth=1
 
     - name: Download kernel source
       run: |
@@ -181,16 +167,6 @@ jobs:
           echo "LOCALVERSION=$(cat android-kernel/localversion 2>/dev/null)" >> $GITHUB_ENV
         else
           echo "LOCALVERSION=" >> $GITHUB_ENV
-        fi
-
-    - name: Download source boot image
-      if: env.BUILD_BOOT_IMG == 'true'
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace
-        wget -nv -O boot-source.img ${{ env.SOURCE_BOOT_IMAGE }}
-        if [ -f boot-source.img ]; then
-            echo "FORMAT_MKBOOTING=$(echo `tools/unpack_bootimg.py --boot_img=boot-source.img --format mkbootimg`)" >> $GITHUB_ENV
-            echo "HAVE_SOURCE_BOOT_IMAGE=true" >> $GITHUB_ENV
         fi
 
     - name: Setup KernelSU (SukiSU-Ultra with SUSFS built-in)
@@ -207,9 +183,6 @@ jobs:
             KSU_VERSION=""
         fi
         echo "UPLOADNAME=-KernelSU$KSU_VERSION" >> $GITHUB_ENV
-        if [ "${{ env.KSU_REVERT }}" = "true" ] && [ -f "$GITHUB_WORKSPACE/patches/KSU_REVERT.patch" ]; then
-            git apply "$GITHUB_WORKSPACE/patches/KSU_REVERT.patch" || true
-        fi
 
     - name: Setup Configuration for Kernel
       run: |
@@ -226,13 +199,6 @@ jobs:
                 sed -i 's/CONFIG_KSU=n/CONFIG_KSU=y/g' "$DEFCONFIG_PATH"
             else
                 echo "CONFIG_KSU=y" >> "$DEFCONFIG_PATH"
-            fi
-
-            if [ "${{ env.ADD_KPROBES_CONFIG }}" = "true" ] && [ "${{ env.KSU_HOOKS_PATCH }}" != "true" ]; then
-                echo "CONFIG_MODULES=y" >> "$DEFCONFIG_PATH"
-                echo "CONFIG_KPROBES=y" >> "$DEFCONFIG_PATH"
-                echo "CONFIG_HAVE_KPROBES=y" >> "$DEFCONFIG_PATH"
-                echo "CONFIG_KPROBE_EVENTS=y" >> "$DEFCONFIG_PATH"
             fi
 
             for config in CONFIG_KSU=y \
@@ -253,7 +219,6 @@ jobs:
                           CONFIG_KSU_SUSFS_SPOOF_PROC_CMDLINE=y \
                           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y \
                           CONFIG_WITH_KPROBES=n \
-                          CONFIG_KPM=y \
                           CONFIG_KALLSYMS=y \
                           CONFIG_KALLSYMS_ALL=y
             do
@@ -269,13 +234,6 @@ jobs:
             echo "CONFIG_OVERLAY_FS=y" >> "$DEFCONFIG_PATH"
             echo "CONFIG_OVERLAY_FS_REDIRECT_DIR=y" >> "$DEFCONFIG_PATH"
             echo "CONFIG_OVERLAY_FS_INDEX=y" >> "$DEFCONFIG_PATH"
-        fi
-
-        if [ "${{ env.ADD_APATCH_SUPPORT }}" = "true" ]; then
-            echo "CONFIG_DEBUG_KERNEL=y" >> "$DEFCONFIG_PATH"
-            echo "CONFIG_KALLSYMS=y" >> "$DEFCONFIG_PATH"
-            echo "CONFIG_KALLSYMS_ALL=y" >> "$DEFCONFIG_PATH"
-            echo "CONFIG_KALLSYMS_BASE_RELATIVE=y" >> "$DEFCONFIG_PATH"
         fi
 
         if [ "${{ env.DISABLE_LTO }}" = "true" ]; then
@@ -306,7 +264,6 @@ jobs:
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         DEFCONFIG_PATH="arch/arm64/configs/${{ env.KERNEL_CONFIG }}"
 
-        # Stack protector checks disable for clang
         sed -i 's/ifdef CONFIG_CC_STACKPROTECTOR_REGULAR/ifdef DISABLED_SP_REGULAR/' Makefile
         sed -i 's/ifdef CONFIG_CC_STACKPROTECTOR_STRONG/ifdef DISABLED_SP_STRONG/' Makefile
         sed -i '/^ifdef CONFIG_CC_STACKPROTECTOR$/s/.*/ifdef DISABLED_SP/' Makefile
@@ -314,7 +271,6 @@ jobs:
         sed -i 's/ifdef stackp-check/ifdef DISABLED_STACKP_CHECK/' Makefile
         echo "Stack protector checks disabled for clang"
 
-        # Fix missing LCM panel Makefile
         find drivers/misc/mediatek/lcm -maxdepth 1 -type d 2>/dev/null | while read d; do
           if [ ! -f "$d/Makefile" ] && [ "$d" != "drivers/misc/mediatek/lcm" ]; then
             echo "obj-y +=" > "$d/Makefile"
@@ -322,27 +278,21 @@ jobs:
           fi
         done
 
-        # Disable compat vDSO (avoid 32-bit cross-compiler)
         sed -i 's/CONFIG_COMPAT_VDSO=y/# CONFIG_COMPAT_VDSO is not set/' "$DEFCONFIG_PATH" 2>/dev/null || true
         echo "# CONFIG_COMPAT_VDSO is not set" >> "$DEFCONFIG_PATH"
 
-        # Patch arch Makefile to not error on missing CROSS_COMPILE_COMPAT
         [ -f arch/arm64/Makefile ] && sed -i 's/$(error CROSS_COMPILE_COMPAT not defined/$(warning CROSS_COMPILE_COMPAT not defined/' arch/arm64/Makefile
         [ -f arch/arm64/Makefile ] && sed -i 's/$(error $(CROSS_COMPILE_COMPAT)/$(warning $(CROSS_COMPILE_COMPAT)/' arch/arm64/Makefile
 
-    # ==========================================================
-    # 🔽 BUILD — clang-11 based (proper for MT6833 4.14)
-    # ==========================================================
     - name: Build kernel
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-32/bin:$PATH"
 
-        # Show toolchain versions
         clang --version | head -1
         $GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin/aarch64-linux-android-gcc --version 2>/dev/null | head -1 || echo "GCC-64 prefix missing"
 
-        KCFLAGS_FIX="-Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=return-type -Wno-error=macro-redefined -Wno-error=array-bounds -Wno-error=misleading-indentation -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=address-of-packed-member -Wno-error=gnu-variable-sized-type-not-at-end"
+        KCFLAGS_FIX="-Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=return-type -Wno-error=macro-redefined -Wno-error=array-bounds -Wno-error=misleading-indentation -Wno-error=unused-but-set-variable -Wno-error=unused-variable -Wno-error=address-of-packed-member"
 
         echo "=== Running defconfig ==="
         make -j$(nproc --all) O=out ARCH=arm64 \
@@ -379,7 +329,7 @@ jobs:
         KERNEL_IMG="android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }}"
         if [ -f "$KERNEL_IMG" ]; then
             echo "CHECK_FILE_IS_OK=true" >> $GITHUB_ENV
-            echo "✅ Kernel image found: $KERNEL_IMG"
+            echo "✅ Kernel image found"
         else
             echo "❌ Kernel output missing: $KERNEL_IMG"
             ls -la android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/ 2>/dev/null || true
@@ -390,7 +340,7 @@ jobs:
                 echo "CHECK_DTBO_IS_OK=true" >> $GITHUB_ENV
                 echo "✅ dtbo.img found"
             else
-                echo "⚠️ dtbo.img missing — continuing without it"
+                echo "⚠️ dtbo.img missing — continuing"
                 echo "CHECK_DTBO_IS_OK=false" >> $GITHUB_ENV
             fi
         fi
@@ -408,45 +358,6 @@ jobs:
             cp android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/dtbo.img AnyKernel3/
         fi
         rm -rf AnyKernel3/.git* AnyKernel3/README.md
-
-    - name: Make Custom-Anykernel3
-      if: env.CHECK_FILE_IS_OK == 'true' && env.USE_CUSTOM_ANYKERNEL3 == 'true'
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace
-        if [[ ${{ env.CUSTOM_ANYKERNEL3_SOURCE }} == *'.tar.gz' ]]; then
-            wget -nv -O AnyKernel3.tar.gz ${{ env.CUSTOM_ANYKERNEL3_SOURCE }}
-            mkdir AnyKernel3
-            tar -C AnyKernel3/ -zxvf AnyKernel3.tar.gz
-        elif [[ ${{ env.CUSTOM_ANYKERNEL3_SOURCE }} == *'.tar.xz' ]]; then
-            wget -nv -O AnyKernel3.tar.xz ${{ env.CUSTOM_ANYKERNEL3_SOURCE }}
-            mkdir AnyKernel3
-            tar -C AnyKernel3/ -Jxvf AnyKernel3.tar.xz
-        elif [[ ${{ env.CUSTOM_ANYKERNEL3_SOURCE }} == *'.git' ]]; then
-            git clone ${{ env.CUSTOM_ANYKERNEL3_SOURCE }} -b ${{ env.CUSTOM_ANYKERNEL3_BRANCH }} --depth=1 AnyKernel3
-        else
-            wget -nv -O AnyKernel3.zip ${{ env.CUSTOM_ANYKERNEL3_SOURCE }}
-            mkdir AnyKernel3
-            unzip AnyKernel3.zip -d AnyKernel3/
-        fi
-        cp android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }} AnyKernel3/
-        if [ "${{ env.CHECK_DTBO_IS_OK }}" = "true" ]; then
-            cp android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/dtbo.img AnyKernel3/
-        fi
-        rm -rf AnyKernel3/.git* AnyKernel3/README.md
-
-    - name: Make boot image
-      if: env.HAVE_SOURCE_BOOT_IMAGE == 'true' && env.CHECK_FILE_IS_OK == 'true'
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace
-        tools/unpack_bootimg.py --boot_img boot-source.img
-        cp android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }} out/kernel
-        tools/mkbootimg.py ${{ env.FORMAT_MKBOOTING }} -o boot.img
-        if [ -f boot.img ]; then
-            echo "MAKE_BOOT_IMAGE_IS_OK=true" >> $GITHUB_ENV
-        else
-            echo "Boot image is empty"
-            exit 1
-        fi
 
     - name: Zip AnyKernel3
       if: env.CHECK_FILE_IS_OK == 'true'
